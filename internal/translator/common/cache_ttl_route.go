@@ -57,14 +57,16 @@ func estimateBlockTokens(raw string) int64 {
 
 // currentTurnTailTokens estimates the tokens of the trailing current-turn
 // input — the part Anthropic never counts as cached. Following kiro.rs's
-// automatic-breakpoint rule, when the last message is a user turn the rolling
-// breakpoint lands on the previous turn's end, so the final user message is
-// the honest uncached tail. When the last message is not a user turn (e.g. an
-// assistant prefill or tool-only continuation) the whole prompt is part of
-// the rolling prefix and the tail is empty.
+// automatic-breakpoint rule, the rolling breakpoint lands on the last
+// cacheable block that is NOT the current-turn input:
 //
-// The trailing user message may itself carry earlier turns' content; only the
-// final message's own blocks count as the current input.
+//	current-turn input = the final message, only when it is a user turn
+//	that does NOT carry tool_result blocks.
+//
+// A tool_result-bearing final user message is a continuation inside an
+// agentic loop, not a fresh human turn, so it stays inside the cached prefix
+// and the tail is empty. When the last message is not a user turn at all the
+// tail is likewise empty — the whole prompt belongs to the rolling prefix.
 func currentTurnTailTokens(body []byte) int64 {
 	messages := gjson.GetBytes(body, "messages")
 	if !messages.IsArray() {
@@ -79,14 +81,21 @@ func currentTurnTailTokens(body []byte) int64 {
 		return 0
 	}
 	var tail int64
+	var hasToolResult bool
 	content := last.Get("content")
 	if content.IsArray() {
 		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "tool_result" {
+				hasToolResult = true
+			}
 			tail += estimateBlockTokens(part.Raw)
 			return true
 		})
 	} else {
 		tail += estimateBlockTokens(content.Raw)
+	}
+	if hasToolResult {
+		return 0
 	}
 	return tail
 }

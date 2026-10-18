@@ -105,3 +105,41 @@ func TestSplitDevinCacheCreationTTL_ZeroAndNegative(t *testing.T) {
 		t.Fatalf("negative creation must clamp to zero, got %d/%d", five, one)
 	}
 }
+
+func TestAnthropicViewUsage_ToolResultTailStaysCached(t *testing.T) {
+	// An agentic-loop turn whose final message is a tool_result continuation
+	// must not count it as fresh input — the whole prompt is rolling prefix.
+	body := []byte(`{
+		"system": [{"type":"text","text":"` + strings.Repeat("s", 4000) + `"}],
+		"messages": [
+			{"role":"user","content":"start"},
+			{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"t1","name":"ls","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"files"}]}
+		]
+	}`)
+	in, read, creation := AnthropicViewUsage(body, 4, 100000, 2000)
+	if in != 4 {
+		t.Fatalf("tool_result tail must not inflate input, got %d", in)
+	}
+	if read+creation+in != 4+100000+2000 {
+		t.Fatalf("conservation broken: %d %d %d", in, read, creation)
+	}
+}
+
+func TestAnthropicViewUsage_FreshUserTailMovesToInput(t *testing.T) {
+	body := []byte(`{
+		"system": [{"type":"text","text":"` + strings.Repeat("s", 4000) + `"}],
+		"messages": [
+			{"role":"user","content":"` + strings.Repeat("q", 400) + `"},
+			{"role":"assistant","content":"ack"},
+			{"role":"user","content":"` + strings.Repeat("x", 400) + `"}
+		]
+	}`)
+	in, read, creation := AnthropicViewUsage(body, 0, 100000, 3000)
+	if in <= 0 {
+		t.Fatalf("fresh user tail must land in input, got %d", in)
+	}
+	if read+creation+in != 103000 {
+		t.Fatalf("conservation broken: %d %d %d", in, read, creation)
+	}
+}
