@@ -5,6 +5,13 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
+## Fork Sync Workflow
+- `main` tracks `upstream/main` and mirrors upstream only. Never commit directly on `main`. Sync upstream with `git checkout main && git pull --ff-only`.
+- `dev` is the long-lived integration branch for your own changes. Feature branches merge into `dev`; `dev` tracks `origin/dev` and is the fork's default branch.
+- Feature/fix branches (`feat/*`, `fix/*`) are cut from `main` (latest upstream). Merge into `dev` for local use, or push to `origin` and open a PR against the upstream repo's `main` when contributing back.
+- To integrate upstream changes into your work: update `main` from upstream first, then `git checkout dev && git merge main`.
+- Remotes: `origin` = your fork, `upstream` = `router-for-me/CLIProxyAPI`. `main` must stay fast-forwardable to `upstream/main`.
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)
