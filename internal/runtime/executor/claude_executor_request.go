@@ -133,16 +133,19 @@ func isManagedClaudeBeta(beta string) bool {
 }
 
 // claudeCodeCLIBetas assembles the Anthropic-Beta baseline the way Claude Code
-// 2.1.280 does: the list is per-request, not a fixed string. requested holds the
+// 2.1.302 does: the list is per-request, not a fixed string. requested holds the
 // betas the caller asked for, which decide the capability flags below.
 //
 // Verified against api.anthropic.com with native 2.1.258 captures on interactive,
 // non-interactive, subagent, and multi-model paths (Sonnet, Opus, Fable, Haiku).
 // Claude Code 2.1.280 (measured 2026-09-23, binary 80abbfe) inserts
 // mid-conversation-tool-changes immediately after mid-conversation-system on the
-// same non-legacy models. The betas named in issue #6054 are feature-gated in
-// that binary, so they are emitted only for the model capability or body shape
-// that actually sends them, in the same relative order:
+// same non-legacy models. Claude Code 2.1.302 (measured 2026-10-17, binary 2ef144e,
+// @anthropic-ai/sdk 0.128.0) keeps that gate and the same relative order; new
+// catalog betas (cache-keepalive, message-threads, auto-mode-classifier) stay
+// off the default first-party list. The betas named in issue #6054 are
+// feature-gated in that binary, so they are emitted only for the model capability
+// or body shape that actually sends them, in the same relative order:
 //
 //	 1 claude-code-20250219
 //	 2 oauth-2025-04-20                  OAuth credentials only
@@ -167,7 +170,7 @@ func isManagedClaudeBeta(beta string) bool {
 //	21 structured-outputs-2025-12-15      structured output requests
 //	22 thinking-binding-controls-2026-08-01  thinking.block_binding, or requested
 //	23 thinking-display-updates-2026-08-18 requests with thinking.display=updates
-//	24 thinking-resumption-2026-07-17     requested only; the 2.1.280 flag defaults off
+//	24 thinking-resumption-2026-07-17     requested only; the 2.1.302 flag defaults off
 //	25 fast-mode-2026-02-01               speed:fast requests only
 //	26 afk-mode-2026-01-31                auto-mode sessions, forwarded when the caller sends it
 //	27 extended-cache-ttl-2025-04-11      OAuth credentials (omitted on subagent & probe)
@@ -295,7 +298,7 @@ func claudeCanonicalModel(model string) string {
 	return model
 }
 
-// claudeModelHasPerTurnEffort reports models whose 2.1.280 catalog capability
+// claudeModelHasPerTurnEffort reports models whose 2.1.302 catalog capability
 // per_turn_effort puts per-turn-control-2026-07-01 on every first-party request.
 func isClaudeOpus55Model(model string) bool {
 	model = claudeCanonicalModel(model)
@@ -406,7 +409,7 @@ func applyClaudePreservedThinkingBinding(body []byte) []byte {
 	return body
 }
 
-// claudeModelUsesProgressDisplay reports the 2.1.280 interactive CLI models that
+// claudeModelUsesProgressDisplay reports the 2.1.302 interactive CLI models that
 // send thinking.display=updates unless the caller already chose a display mode.
 func claudeModelUsesProgressDisplay(model string) bool {
 	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
@@ -1344,7 +1347,7 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 	}
 	applyBetaHeader := func() {
-		// Enforce strict native Claude Code 2.1.280 model & turn beta gating:
+		// Enforce strict native Claude Code 2.1.302 model & turn beta gating:
 		if !claudeRequestSupportsEffort(body, nil) {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
 		}
@@ -1464,7 +1467,7 @@ func applyClaudeHeadersWithNativeProfile(
 	identityHeader("Anthropic-Version", "2023-06-01")
 	identityHeader("Anthropic-Dangerous-Direct-Browser-Access", "true")
 	identityHeader("X-App", "cli")
-	// Values below match Claude Code 2.1.280 / @anthropic-ai/sdk 0.112.1.
+	// Values below match Claude Code 2.1.302 / @anthropic-ai/sdk 0.128.0.
 	identityHeader("X-Stainless-Retry-Count", "0")
 	identityHeader("X-Stainless-Runtime", "node")
 	identityHeader("X-Stainless-Lang", "js")

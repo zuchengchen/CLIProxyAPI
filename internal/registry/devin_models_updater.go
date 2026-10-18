@@ -23,7 +23,9 @@ func StartDevinModelsUpdater(ctx context.Context) {
 func tryRefreshDevinModels(ctx context.Context, label string) {
 	data, sourceURL := fetchDevinModelsFromRemote(ctx)
 	if data == nil {
-		log.Warnf("%s: fetch failed from all URLs, keeping current data (embedded or cached fallback)", label)
+		if ctx.Err() == nil {
+			log.Warnf("%s: fetch failed from all URLs, keeping current data (embedded or cached fallback)", label)
+		}
 		return
 	}
 

@@ -93,7 +93,9 @@ func refreshXAIClientVersion(ctx context.Context) {
 
 	version, errFetch := FetchXAINPMLatestVersion(ctx, nil)
 	if errFetch != nil {
-		log.WithError(errFetch).Warn("failed to fetch latest Grok CLI version from npm, keeping fallback/cached version")
+		if ctx.Err() == nil {
+			log.WithError(errFetch).Warn("failed to fetch latest Grok CLI version from npm, keeping fallback/cached version")
+		}
 		return
 	}
 

@@ -23,7 +23,9 @@ func StartCodexClientModelsUpdater(ctx context.Context) {
 func tryRefreshCodexClientModels(ctx context.Context, label string) {
 	data, sourceURL := fetchCodexClientModelsFromRemote(ctx)
 	if data == nil {
-		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
+		if ctx.Err() == nil {
+			log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
+		}
 		return
 	}
 

@@ -91,7 +91,9 @@ func refreshAntigravityVersion(ctx context.Context) {
 	if cachedAntigravityVersion == "" || now.After(antigravityVersionExpiry) {
 		cachedAntigravityVersion = antigravityFallbackVersion
 		antigravityVersionExpiry = now.Add(antigravityVersionCacheTTL)
-		log.WithError(errFetch).Warn("failed to refresh antigravity version, using fallback version")
+		if ctx.Err() == nil {
+			log.WithError(errFetch).Warn("failed to refresh antigravity version, using fallback version")
+		}
 		return
 	}
 
