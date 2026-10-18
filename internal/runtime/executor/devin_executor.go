@@ -3,7 +3,9 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -414,7 +416,7 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 	if errTurns != nil {
 		return nil, "", nil, errTurns
 	}
-	sessionID, cascadeID = resolveDevinSessionAndCascadeIDs(ctx, sessionID, cascadeID, opts)
+	sessionID, cascadeID = resolveDevinSessionAndCascadeIDs(ctx, sessionID, cascadeID, opts, systemPrompt, prompts, tools)
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if modelInfo := registry.LookupModelInfo(baseModel, "devin"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
@@ -1636,12 +1638,12 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 	// 3. Session and Cascade ID
 	// Prioritize stable session identifiers across turns (session_id, sessionId, conversation_id)
 	// to ensure upstream session ID and cascade ID remain stable, preserving prompt caching.
-	// Fall back to previous_interaction_id only when no stable session identifier exists.
+	// previous_interaction_id is deliberately excluded: it changes every request and would
+	// reset the cache key each turn.
 	sessionID = strings.TrimSpace(firstNonEmpty(
 		root.Get("session_id").String(),
 		root.Get("sessionId").String(),
 		root.Get("conversation_id").String(),
-		root.Get("previous_interaction_id").String(),
 	))
 	if sessionID == "" && len(originalRequest) > 0 {
 		origRoot := gjson.ParseBytes(originalRequest)
@@ -1649,7 +1651,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 			origRoot.Get("session_id").String(),
 			origRoot.Get("sessionId").String(),
 			origRoot.Get("conversation_id").String(),
-			origRoot.Get("previous_interaction_id").String(),
 		))
 	}
 	cascadeID = sessionID
@@ -1688,7 +1689,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 			case "user_input":
 				text, images, droppedPart := extractInteractionsStepContent(step)
 				prompts = append(prompts, helps.DevinPrompt{
-					MessageID:   uuid.New().String(),
 					Source:      1,
 					Content:     text,
 					Images:      images,
@@ -1711,7 +1711,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					}
 				} else {
 					prompts = append(prompts, helps.DevinPrompt{
-						MessageID:     uuid.New().String(),
 						Source:        2,
 						Content:       text,
 						Signature:     sigBytes,
@@ -1736,7 +1735,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					}
 				} else {
 					prompts = append(prompts, helps.DevinPrompt{
-						MessageID:     uuid.New().String(),
 						Source:        2,
 						Thinking:      text,
 						Signature:     sigBytes,
@@ -1759,7 +1757,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					prompts[len(prompts)-1].ToolCalls = append(prompts[len(prompts)-1].ToolCalls, tc)
 				} else {
 					prompts = append(prompts, helps.DevinPrompt{
-						MessageID: uuid.New().String(),
 						Source:    2,
 						ToolCalls: []helps.DevinToolCall{tc},
 					})
@@ -1771,7 +1768,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 				resText, resImages := extractFunctionResultContent(step)
 				if matched, matchedID := matchPendingToolCall(id); matched {
 					prompts = append(prompts, helps.DevinPrompt{
-						MessageID:  uuid.New().String(),
 						Source:     4,
 						ToolCallID: matchedID,
 						Content:    resText,
@@ -1779,7 +1775,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					})
 				} else {
 					prompts = append(prompts, helps.DevinPrompt{
-						MessageID:          uuid.New().String(),
 						Source:             1,
 						OriginalToolCallID: id,
 						IsOrphanedTool:     true,
@@ -1801,7 +1796,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 			case "user":
 				text, images, droppedPart := extractInteractionsStepContent(m)
 				prompts = append(prompts, helps.DevinPrompt{
-					MessageID:   uuid.New().String(),
 					Source:      1,
 					Content:     text,
 					Images:      images,
@@ -1836,7 +1830,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					}
 				}
 				prompts = append(prompts, helps.DevinPrompt{
-					MessageID: uuid.New().String(),
 					Source:    2,
 					Content:   text,
 					ToolCalls: toolCalls,
@@ -1846,7 +1839,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 				resText, resImages := extractFunctionResultContent(m)
 				if matched, matchedID := matchPendingToolCall(id); matched {
 					prompts = append(prompts, helps.DevinPrompt{
-						MessageID:  uuid.New().String(),
 						Source:     4,
 						ToolCallID: matchedID,
 						Content:    resText,
@@ -1854,7 +1846,6 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					})
 				} else {
 					prompts = append(prompts, helps.DevinPrompt{
-						MessageID:          uuid.New().String(),
 						Source:             1,
 						OriginalToolCallID: id,
 						IsOrphanedTool:     true,
@@ -2705,13 +2696,20 @@ func devinAuthLogFields(auth *cliproxyauth.Auth) (authID, authLabel, authType, a
 	return
 }
 
-func resolveDevinSessionAndCascadeIDs(ctx context.Context, sessionID, cascadeID string, opts cliproxyexecutor.Options) (string, string) {
+func resolveDevinSessionAndCascadeIDs(ctx context.Context, sessionID, cascadeID string, opts cliproxyexecutor.Options, systemPrompt string, prompts []helps.DevinPrompt, tools []helps.DevinTool) (string, string) {
 	if sessionID == "" {
 		if ctxSession := util.SessionIDFromContext(ctx); ctxSession != "" {
 			sessionID = ctxSession
 		} else if canon := cliproxyauth.CanonicalSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata); canon != "" {
 			sessionID = canon
 		}
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		// No client identity at all: derive a deterministic session from the
+		// stable conversation anchor (system prompt + first user turn + tool
+		// names) so stateless clients still keep a single cascade/prompt-cache
+		// key instead of a fresh random UUID per request.
+		sessionID = deriveDevinSessionFallback(systemPrompt, prompts, tools)
 	}
 	sessionID = normalizeDevinUUID(sessionID)
 	if cascadeID == "" {
@@ -2720,6 +2718,29 @@ func resolveDevinSessionAndCascadeIDs(ctx context.Context, sessionID, cascadeID 
 		cascadeID = normalizeDevinUUID(cascadeID)
 	}
 	return sessionID, cascadeID
+}
+
+// deriveDevinSessionFallback builds a stable, non-UUID session seed from the
+// request's static prefix. Mirrors the fallback_conversation_id approach used
+// for clients that never send a session identifier: the same conversation
+// re-derives the same session, keeping upstream prompt caching effective.
+func deriveDevinSessionFallback(systemPrompt string, prompts []helps.DevinPrompt, tools []helps.DevinTool) string {
+	h := sha256.New()
+	h.Write([]byte(systemPrompt))
+	for _, t := range tools {
+		h.Write([]byte{0})
+		h.Write([]byte(t.Name))
+	}
+	for _, p := range prompts {
+		if p.Source != 1 {
+			continue
+		}
+		h.Write([]byte{1})
+		h.Write([]byte(p.Content))
+		break
+	}
+	sum := h.Sum(nil)
+	return "cpa:derived:" + hex.EncodeToString(sum[:16])
 }
 
 func normalizeDevinUUID(raw string) string {

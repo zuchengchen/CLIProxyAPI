@@ -150,7 +150,7 @@ func TestParseInteractionsPayload(t *testing.T) {
 			"max_output_tokens": 16000,
 			"thinking_level": "high"
 		},
-		"previous_interaction_id": "session-uuid-1",
+		"session_id": "session-uuid-1",
 		"input": [
 			{"type":"user_input","content":[{"type":"text","text":"hello"}]},
 			{"type":"thought","content":[{"type":"text","text":"planning..."}],"signature":"c2VhbGVkLnYxLnRlc3Q="},
@@ -357,14 +357,14 @@ func TestDevinStatusError_RetryAfter(t *testing.T) {
 func TestResolveDevinSessionAndCascadeIDs(t *testing.T) {
 	// 1. Direct UUID preservation
 	rawUUID := "8176cf8a-feff-44c1-8e3e-b10f6d737ae1"
-	sid, cid := resolveDevinSessionAndCascadeIDs(context.Background(), rawUUID, rawUUID, cliproxyexecutor.Options{})
+	sid, cid := resolveDevinSessionAndCascadeIDs(context.Background(), rawUUID, rawUUID, cliproxyexecutor.Options{}, "", nil, nil)
 	if sid != rawUUID || cid != rawUUID {
 		t.Fatalf("sid/cid = %q/%q, want %q", sid, cid, rawUUID)
 	}
 
 	// 2. Non-UUID mapping to deterministic UUID
-	sid1, cid1 := resolveDevinSessionAndCascadeIDs(context.Background(), "lcp:12345678", "", cliproxyexecutor.Options{})
-	sid2, cid2 := resolveDevinSessionAndCascadeIDs(context.Background(), "lcp:12345678", "", cliproxyexecutor.Options{})
+	sid1, cid1 := resolveDevinSessionAndCascadeIDs(context.Background(), "lcp:12345678", "", cliproxyexecutor.Options{}, "", nil, nil)
+	sid2, cid2 := resolveDevinSessionAndCascadeIDs(context.Background(), "lcp:12345678", "", cliproxyexecutor.Options{}, "", nil, nil)
 	if sid1 != sid2 || cid1 != cid2 {
 		t.Fatalf("deterministic mapping failed: %q != %q", sid1, sid2)
 	}
@@ -374,7 +374,7 @@ func TestResolveDevinSessionAndCascadeIDs(t *testing.T) {
 
 	// 3. Fallback to ctx session
 	ctx := util.WithSessionID(context.Background(), "ctx-session-abc")
-	sidCtx, cidCtx := resolveDevinSessionAndCascadeIDs(ctx, "", "", cliproxyexecutor.Options{})
+	sidCtx, cidCtx := resolveDevinSessionAndCascadeIDs(ctx, "", "", cliproxyexecutor.Options{}, "", nil, nil)
 	if _, err := uuid.Parse(sidCtx); err != nil {
 		t.Fatalf("sidCtx is not a valid UUID: %q", sidCtx)
 	}
@@ -383,7 +383,7 @@ func TestResolveDevinSessionAndCascadeIDs(t *testing.T) {
 	}
 
 	// 4. Fallback to fresh UUID when nothing supplied
-	sidEmpty, cidEmpty := resolveDevinSessionAndCascadeIDs(context.Background(), "", "", cliproxyexecutor.Options{})
+	sidEmpty, cidEmpty := resolveDevinSessionAndCascadeIDs(context.Background(), "", "", cliproxyexecutor.Options{}, "", nil, nil)
 	if _, err := uuid.Parse(sidEmpty); err != nil {
 		t.Fatalf("sidEmpty is not a valid UUID: %q", sidEmpty)
 	}
@@ -5038,5 +5038,51 @@ func TestDevinExecutor_ContextLengthExceededRejection(t *testing.T) {
 	reqUnknown := cliproxyexecutor.Request{Model: "devin/unknown-ctx-test", Payload: oversized}
 	if _, _, _, err := exec.prepareDevinHTTPRequest(context.Background(), auth, reqUnknown, opts); err != nil {
 		t.Fatalf("unknown model should bypass context guard, got: %v", err)
+	}
+}
+
+// TestResolveDevinSessionAndCascadeIDs_ContentDerivedFallback verifies that a
+// request carrying no session identifier still resolves to a deterministic
+// session/cascade ID derived from the stable conversation prefix, instead of a
+// fresh random UUID per request (which would defeat upstream prompt caching).
+func TestResolveDevinSessionAndCascadeIDs_ContentDerivedFallback(t *testing.T) {
+	prompts := []helps.DevinPrompt{
+		{Source: 1, Content: "shared first user turn"},
+		{Source: 2, Content: "assistant reply"},
+	}
+	sid1, cid1 := resolveDevinSessionAndCascadeIDs(context.Background(), "", "", cliproxyexecutor.Options{}, "sys", prompts, nil)
+	sid2, cid2 := resolveDevinSessionAndCascadeIDs(context.Background(), "", "", cliproxyexecutor.Options{}, "sys", prompts, nil)
+
+	if sid1 != sid2 || cid1 != cid2 {
+		t.Fatalf("content-derived session must be deterministic: %q vs %q", sid1, sid2)
+	}
+	if _, err := uuid.Parse(sid1); err != nil {
+		t.Fatalf("derived session is not a valid UUID: %q", sid1)
+	}
+	if sid1 != cid1 {
+		t.Fatalf("cascade should default to session: %q != %q", sid1, cid1)
+	}
+
+	// Different first user turn produces a different session.
+	promptsOther := []helps.DevinPrompt{
+		{Source: 1, Content: "a different first user turn"},
+	}
+	sid3, _ := resolveDevinSessionAndCascadeIDs(context.Background(), "", "", cliproxyexecutor.Options{}, "sys", promptsOther, nil)
+	if sid3 == sid1 {
+		t.Fatalf("distinct anchors must not collide: %q", sid3)
+	}
+}
+
+// TestParseInteractionsPayload_PreviousInteractionIDNotSession guards the fix
+// where previous_interaction_id (per-request, changes every turn) was consumed
+// as the session/cascade key, resetting the upstream prompt cache each turn.
+func TestParseInteractionsPayload_PreviousInteractionIDNotSession(t *testing.T) {
+	payload := []byte(`{
+		"previous_interaction_id": "interaction-rotates-every-request",
+		"input": [{"type":"user_input","content":[{"type":"text","text":"hi"}]}]
+	}`)
+	_, _, _, _, _, sessID, cascadeID, _, _ := parseInteractionsPayload(payload, nil)
+	if sessID == "interaction-rotates-every-request" || cascadeID == "interaction-rotates-every-request" {
+		t.Fatalf("previous_interaction_id must not seed session/cascade: %q/%q", sessID, cascadeID)
 	}
 }

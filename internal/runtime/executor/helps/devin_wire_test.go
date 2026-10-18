@@ -990,3 +990,103 @@ func TestRegressionIssue5910_ToolCallDeltaFields(t *testing.T) {
 		t.Errorf("tc.IsCustomToolCall = %v, want true", tc.IsCustomToolCall)
 	}
 }
+
+// extractPromptMessageIDs pulls Field 3.1 (message id) for each history prompt.
+func extractPromptMessageIDs(t *testing.T, reqBytes []byte) []string {
+	t.Helper()
+	b := reqBytes
+	var ids []string
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			break
+		}
+		b = b[n:]
+		if num == 3 && typ == protowire.BytesType {
+			sub, m := protowire.ConsumeBytes(b)
+			if m < 0 {
+				break
+			}
+			// Prompt submessage: field 1 is the id string
+			sb := sub
+			id := ""
+			for len(sb) > 0 {
+				sn, st, snn := protowire.ConsumeTag(sb)
+				if snn < 0 {
+					break
+				}
+				sb = sb[snn:]
+				if sn == 1 && st == protowire.BytesType {
+					v, mm := protowire.ConsumeString(sb)
+					if mm < 0 {
+						break
+					}
+					id = v
+					break
+				}
+				mv := protowire.ConsumeFieldValue(sn, st, sb)
+				if mv < 0 {
+					break
+				}
+				sb = sb[mv:]
+			}
+			ids = append(ids, id)
+			b = b[m:]
+			continue
+		}
+		m := protowire.ConsumeFieldValue(num, typ, b)
+		if m < 0 {
+			break
+		}
+		b = b[m:]
+	}
+	return ids
+}
+
+// TestBuildDevinGetChatMessageRequest_DeterministicMessageIDs verifies that
+// prompts without a client-supplied MessageID get a stable ID derived from
+// (sessionID, position, content) so repeated turns with the same history keep
+// byte-identical prefixes — a prerequisite for upstream prompt caching.
+func TestBuildDevinGetChatMessageRequest_DeterministicMessageIDs(t *testing.T) {
+	prompts := []DevinPrompt{
+		{Source: 1, Content: "first user turn"},
+		{Source: 2, Content: "assistant reply", Thinking: "thinking"},
+		{Source: 1, Content: "second user turn"},
+	}
+	sessionID := "8176cf8a-feff-44c1-8e3e-b10f6d737ae1"
+
+	req1 := BuildDevinGetChatMessageRequest("tok", "seed", "swe-2-high", "", prompts, nil, nil, 100, sessionID, sessionID, nil)
+	req2 := BuildDevinGetChatMessageRequest("tok", "seed", "swe-2-high", "", prompts, nil, nil, 100, sessionID, sessionID, nil)
+
+	ids1 := extractPromptMessageIDs(t, req1)
+	ids2 := extractPromptMessageIDs(t, req2)
+	if len(ids1) != 3 {
+		t.Fatalf("ids1 len = %d, want 3", len(ids1))
+	}
+	for i := range ids1 {
+		if ids1[i] == "" {
+			t.Fatalf("prompt %d got empty message id", i)
+		}
+		if _, err := uuid.Parse(ids1[i]); err != nil {
+			t.Fatalf("prompt %d id not a UUID: %q", i, ids1[i])
+		}
+		if ids1[i] != ids2[i] {
+			t.Fatalf("prompt %d id unstable across identical requests: %q vs %q", i, ids1[i], ids2[i])
+		}
+	}
+
+	// Different session → different IDs (session scoping)
+	req3 := BuildDevinGetChatMessageRequest("tok", "seed", "swe-2-high", "", prompts, nil, nil, 100, "other-session", "other-session", nil)
+	ids3 := extractPromptMessageIDs(t, req3)
+	if ids3[0] == ids1[0] {
+		t.Fatalf("session change must rekey message ids: %q == %q", ids3[0], ids1[0])
+	}
+
+	// Client-supplied MessageID wins over derivation
+	custom := []DevinPrompt{{MessageID: "explicit-id-1", Source: 1, Content: "first user turn"}}
+	req4 := BuildDevinGetChatMessageRequest("tok", "seed", "swe-2-high", "", custom, nil, nil, 100, sessionID, sessionID, nil)
+	ids4 := extractPromptMessageIDs(t, req4)
+	if ids4[0] != "explicit-id-1" {
+		t.Fatalf("explicit MessageID overridden: %q", ids4[0])
+	}
+}

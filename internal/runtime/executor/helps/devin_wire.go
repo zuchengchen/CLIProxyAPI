@@ -189,6 +189,23 @@ func ResetDevinSessionTurnIndex(sessionID string) {
 	sessionTurnLRU.Delete(strings.TrimSpace(sessionID))
 }
 
+// devinPromptMessageID derives a deterministic RFC 4122 UUID for a history
+// prompt that did not carry a client-supplied MessageID. Seeding on
+// (sessionID, index, content) keeps IDs stable across turns replaying the same
+// conversation prefix, which upstream prompt caching depends on.
+func devinPromptMessageID(sessionID string, index int, p DevinPrompt) string {
+	h := sha256.New()
+	h.Write([]byte(sessionID))
+	fmt.Fprintf(h, "|%d|%d|", index, p.Source)
+	h.Write([]byte(p.Content))
+	for _, tc := range p.ToolCalls {
+		fmt.Fprintf(h, "|tc:%s:%s:%s", tc.ID, tc.Name, tc.Arguments)
+	}
+	h.Write([]byte("|" + p.ToolCallID))
+	h.Write([]byte("|" + p.Thinking))
+	return uuid.NewSHA1(uuid.NameSpaceOID, h.Sum(nil)).String()
+}
+
 // WrapConnectEnvelope wraps raw payload bytes into a standard 5-byte Connect envelope:
 // [1 byte flag: 0x00] + [4 byte big-endian length] + [payload].
 func WrapConnectEnvelope(protoBytes []byte) []byte {
@@ -330,12 +347,15 @@ func BuildDevinGetChatMessageRequest(
 	}
 
 	// 3. Repeated History Prompts (Field 3)
-	for _, p := range prompts {
+	for idx, p := range prompts {
 		var pBytes []byte
 
 		msgID := p.MessageID
 		if msgID == "" {
-			msgID = uuid.New().String()
+			// Deterministic per-position ID: replaying the same conversation
+			// history must reproduce identical prefix bytes so upstream prompt
+			// caching (keyed on cascade_id, Field 16) can actually hit.
+			msgID = devinPromptMessageID(sessionID, idx, p)
 		}
 		pBytes = protowire.AppendTag(pBytes, 1, protowire.BytesType)
 		pBytes = protowire.AppendString(pBytes, msgID)
