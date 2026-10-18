@@ -8,6 +8,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -27,10 +28,12 @@ type interactionsToClaudeStreamState struct {
 	ToolNames       map[int]string
 	ToolIDs         map[int]string
 	ToolSignatures  map[int]string
+	// OriginalRequest keeps the client-side Claude request so usage mapping can
+	// recover declared cache_control TTLs for the ephemeral 5m/1h split.
+	OriginalRequest []byte
 }
 
 func ConvertInteractionsResponseToClaude(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	if param == nil {
 		var local any
@@ -41,12 +44,12 @@ func ConvertInteractionsResponseToClaude(_ context.Context, modelName string, or
 	}
 	st := (*param).(*interactionsToClaudeStreamState)
 	st.Model = firstNonEmpty(st.Model, modelName)
+	st.OriginalRequest = originalRequestRawJSON
 	st.ensureMaps()
 	return convertInteractionsEventToClaude(modelName, rawJSON, st)
 }
 
 func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
 	interaction := root
@@ -106,7 +109,7 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 	if status == "incomplete" || finishReason == "length" || finishReason == "max_tokens" {
 		out, _ = sjson.SetBytes(out, "stop_reason", "max_tokens")
 	}
-	out = setClaudeUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
+	out = setClaudeUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root), originalRequestRawJSON)
 	return out
 }
 
@@ -290,7 +293,7 @@ func appendClaudeMessageDelta(out [][]byte, root gjson.Result, st *interactionsT
 	if status == "incomplete" || finishReason == "length" || finishReason == "max_tokens" {
 		payload, _ = sjson.SetBytes(payload, "delta.stop_reason", "max_tokens")
 	}
-	payload = setClaudeUsageFromInteractions(payload, "usage", translatorcommon.InteractionsUsage(root))
+	payload = setClaudeUsageFromInteractions(payload, "usage", translatorcommon.InteractionsUsage(root), st.OriginalRequest)
 	out = append(out, translatorcommon.AppendSSEEventBytes(nil, "message_delta", payload, 3))
 	st.Completed = true
 	return out
@@ -332,7 +335,7 @@ func appendClaudeError(out [][]byte, root gjson.Result, st *interactionsToClaude
 	return append(out, translatorcommon.AppendSSEEventBytes(nil, "error", payload, 3))
 }
 
-func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result) []byte {
+func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result, originalRequest []byte) []byte {
 	if !usage.Exists() {
 		return out
 	}
@@ -374,8 +377,34 @@ func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result)
 	}
 	if hasCacheWrite && cacheWriteTokens > 0 {
 		out, _ = sjson.SetBytes(out, path+".cache_creation_input_tokens", cacheWriteTokens)
+		// Devin's aggregate cache_write has no TTL dimension; split it into the
+		// Anthropic-style ephemeral buckets so downstream relays can bill the
+		// two TTLs. Session detection reuses the same signals the executor uses.
+		cc5m, cc1h := translatorcommon.SplitDevinCacheCreationTTL(originalRequest, cacheWriteTokens, claudeRequestHasSession(originalRequest))
+		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_5m_input_tokens", cc5m)
+		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_1h_input_tokens", cc1h)
 	}
 	return out
+}
+
+// claudeRequestHasSession reports whether the original Claude request carried a
+// session identifier, which keeps the smart TTL router from promoting the
+// shared-static-prefix rule: session-scoped prefixes are never shared across
+// conversations.
+func claudeRequestHasSession(originalRequest []byte) bool {
+	if len(originalRequest) == 0 {
+		return false
+	}
+	if cliproxysession.ClaudeMetadataSessionID(originalRequest) != "" {
+		return true
+	}
+	root := gjson.ParseBytes(originalRequest)
+	for _, key := range []string{"session_id", "sessionId", "conversation_id", "chat_id", "prompt_cache_key"} {
+		if strings.TrimSpace(root.Get(key).String()) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func interactionsSSEPayload(rawJSON []byte) []byte {
