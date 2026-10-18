@@ -1157,7 +1157,7 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.finish_reason", completionFinishReason)
 	}
 	if finalUsage != nil {
-		totalInput := finalUsage.PromptTokens + finalUsage.CachedTokens
+		totalInput := finalUsage.PromptTokens + finalUsage.CachedTokens + finalUsage.CacheWriteTokens
 		totalOutput := finalUsage.CompletionTokens
 		totalTokens := totalInput + totalOutput
 
@@ -1561,7 +1561,7 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 	}
 
 	if finalUsage != nil {
-		totalInput := finalUsage.PromptTokens + finalUsage.CachedTokens
+		totalInput := finalUsage.PromptTokens + finalUsage.CachedTokens + finalUsage.CacheWriteTokens
 		totalOutput := finalUsage.CompletionTokens
 		totalTokens := totalInput + totalOutput
 
