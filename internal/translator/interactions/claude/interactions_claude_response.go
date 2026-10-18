@@ -354,17 +354,24 @@ func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result,
 	hasInput := false
 	var inputTokens int64
 
+	var uncachedInput int64
 	if inNode := usage.Get("input_tokens"); inNode.Exists() {
 		hasInput = true
-		inputTokens = inNode.Int()
+		uncachedInput = inNode.Int()
+		inputTokens = uncachedInput
 	} else if totalVal, ok := firstUsageInt(usage, "total_input_tokens", "prompt_tokens"); ok {
 		hasInput = true
 		if totalVal >= totalCache {
-			inputTokens = totalVal - totalCache
-		} else {
-			inputTokens = 0
+			uncachedInput = totalVal - totalCache
 		}
+		inputTokens = uncachedInput
 	}
+
+	// Anthropic billing view: the trailing current-turn input is plain
+	// input_tokens, not part of the cache write. Remap the upstream's
+	// aggregate accounting (uncached/read/write) so relays billing
+	// Anthropic-style see the same split a real Anthropic endpoint reports.
+	inputTokens, remappedRead, remappedCreation := translatorcommon.AnthropicViewUsage(originalRequest, uncachedInput, cachedTokens, cacheWriteTokens)
 
 	if hasInput {
 		out, _ = sjson.SetBytes(out, path+".input_tokens", inputTokens)
@@ -372,15 +379,15 @@ func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result,
 	if hasOutput {
 		out, _ = sjson.SetBytes(out, path+".output_tokens", outputTokens)
 	}
-	if hasCached && cachedTokens > 0 {
-		out, _ = sjson.SetBytes(out, path+".cache_read_input_tokens", cachedTokens)
+	if hasCached && remappedRead > 0 {
+		out, _ = sjson.SetBytes(out, path+".cache_read_input_tokens", remappedRead)
 	}
-	if hasCacheWrite && cacheWriteTokens > 0 {
-		out, _ = sjson.SetBytes(out, path+".cache_creation_input_tokens", cacheWriteTokens)
+	if hasCacheWrite && remappedCreation > 0 {
+		out, _ = sjson.SetBytes(out, path+".cache_creation_input_tokens", remappedCreation)
 		// Devin's aggregate cache_write has no TTL dimension; split it into the
 		// Anthropic-style ephemeral buckets so downstream relays can bill the
 		// two TTLs. Session detection reuses the same signals the executor uses.
-		cc5m, cc1h := translatorcommon.SplitDevinCacheCreationTTL(originalRequest, cacheWriteTokens, claudeRequestHasSession(originalRequest))
+		cc5m, cc1h := translatorcommon.SplitDevinCacheCreationTTL(originalRequest, remappedCreation, claudeRequestHasSession(originalRequest))
 		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_5m_input_tokens", cc5m)
 		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_1h_input_tokens", cc1h)
 	}

@@ -693,22 +693,30 @@ func TestConvertInteractionsResponseToClaudeNonStream_CacheTTLSplit(t *testing.T
 		"model": "devin/claude-sonnet-5-5",
 		"metadata": {"user_id": "user_probe__session_abc"},
 		"system": [{"type":"text","text":"` + strings.Repeat("s", 4000) + `","cache_control":{"type":"ephemeral","ttl":"1h"}}],
-		"messages": [{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("m", 4000) + `","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("m", 4000) + `","cache_control":{"type":"ephemeral","ttl":"5m"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"ack"}]},
+			{"role":"user","content":"go"}
+		]
 	}`)
 	raw := []byte(`{"id":"i1","model":"devin/claude-sonnet-5-5","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}],"usage":{"total_input_tokens":2000,"total_output_tokens":5,"total_cached_tokens":0,"cache_write_tokens":800}}`)
 	out := ConvertInteractionsResponseToClaudeNonStream(context.Background(), "devin/claude-sonnet-5-5", orig, nil, raw, nil)
 
 	cc := gjson.GetBytes(out, "usage.cache_creation_input_tokens").Int()
-	if cc != 800 {
-		t.Fatalf("cache_creation_input_tokens = %d, want 800", cc)
-	}
 	cc5m := gjson.GetBytes(out, "usage.cache_creation.ephemeral_5m_input_tokens").Int()
 	cc1h := gjson.GetBytes(out, "usage.cache_creation.ephemeral_1h_input_tokens").Int()
-	if cc5m+cc1h != 800 {
-		t.Fatalf("ephemeral buckets must conserve creation: %d+%d", cc5m, cc1h)
+	if cc <= 0 {
+		t.Fatalf("creation must remain positive after tail remap, got %d", cc)
+	}
+	if cc5m+cc1h != cc {
+		t.Fatalf("ephemeral buckets must conserve creation: %d+%d != %d", cc5m, cc1h, cc)
 	}
 	if cc1h == 0 {
 		t.Fatalf("explicit 1h breakpoint must yield a 1h share")
+	}
+	// The tiny trailing user turn lands in input_tokens, not the write.
+	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got <= 0 {
+		t.Fatalf("current-turn input must be nonzero, got %d", got)
 	}
 
 	// Same upstream usage but the request declares no cache_control at all =>
@@ -718,7 +726,7 @@ func TestConvertInteractionsResponseToClaudeNonStream_CacheTTLSplit(t *testing.T
 	if got := gjson.GetBytes(out2, "usage.cache_creation.ephemeral_1h_input_tokens").Int(); got != 0 {
 		t.Fatalf("no declared 1h breakpoint must report 0 1h tokens, got %d", got)
 	}
-	if got := gjson.GetBytes(out2, "usage.cache_creation.ephemeral_5m_input_tokens").Int(); got != 800 {
-		t.Fatalf("creation must all be 5m, got %d", got)
+	if got := gjson.GetBytes(out2, "usage.cache_creation.ephemeral_5m_input_tokens").Int(); got <= 0 {
+		t.Fatalf("creation must still flow to 5m bucket, got %d", got)
 	}
 }

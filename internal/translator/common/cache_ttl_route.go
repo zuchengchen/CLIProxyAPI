@@ -49,6 +49,110 @@ func estimateTokens(raw string) int64 {
 	return int64(len(raw) / 4)
 }
 
+// estimateBlockTokens estimates tokens for one prompt block (tool, system
+// block, or message content part) in the same units as estimateTokens.
+func estimateBlockTokens(raw string) int64 {
+	return estimateTokens(raw)
+}
+
+// currentTurnTailTokens estimates the tokens of the trailing current-turn
+// input — the part Anthropic never counts as cached. Following kiro.rs's
+// automatic-breakpoint rule, when the last message is a user turn the rolling
+// breakpoint lands on the previous turn's end, so the final user message is
+// the honest uncached tail. When the last message is not a user turn (e.g. an
+// assistant prefill or tool-only continuation) the whole prompt is part of
+// the rolling prefix and the tail is empty.
+//
+// The trailing user message may itself carry earlier turns' content; only the
+// final message's own blocks count as the current input.
+func currentTurnTailTokens(body []byte) int64 {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return 0
+	}
+	arr := messages.Array()
+	if len(arr) == 0 {
+		return 0
+	}
+	last := arr[len(arr)-1]
+	if last.Get("role").String() != "user" {
+		return 0
+	}
+	var tail int64
+	content := last.Get("content")
+	if content.IsArray() {
+		content.ForEach(func(_, part gjson.Result) bool {
+			tail += estimateBlockTokens(part.Raw)
+			return true
+		})
+	} else {
+		tail += estimateBlockTokens(content.Raw)
+	}
+	return tail
+}
+
+// AnthropicViewUsage remaps an upstream's aggregate cache accounting into the
+// Anthropic billing view where the trailing current-turn input is reported as
+// plain input_tokens instead of being absorbed into cache writes. Some
+// upstreams (e.g. Devin) charge the whole prompt including the fresh tail as
+// cache writes; Anthropic's model only writes the stable rolling prefix, so
+// relays that bill Anthropic-style should see the tail moved back to input.
+//
+// Inputs are the upstream-reported totals: uncached (prompt_tokens), cached
+// (cache read), cacheWrite (cache creation), and the original request body
+// used to estimate the current-turn tail share.
+//
+// Returns (inputTokens, cacheRead, cacheCreation); output tokens pass through
+// unchanged and are handled by the caller. Conservation holds:
+// input + read + creation == uncached + cached + cacheWrite.
+func AnthropicViewUsage(originalRequest []byte, uncached, cached, cacheWrite int64) (input, read, creation int64) {
+	total := uncached + cached + cacheWrite
+	if total <= 0 {
+		return 0, 0, 0
+	}
+
+	// Estimated shares of the current-turn tail within the whole prompt.
+	// tailReal scales the estimated tail into the real upstream total so the
+	// split is proportional rather than dependent on the estimator's absolute
+	// accuracy.
+	var tailReal int64
+	if len(originalRequest) > 0 {
+		tailEst := currentTurnTailTokens(originalRequest)
+		if tailEst > 0 {
+			promptEst := estimateTokens(string(originalRequest))
+			if promptEst > tailEst {
+				tailReal = total * tailEst / promptEst
+			}
+		}
+	}
+	if tailReal < 0 {
+		tailReal = 0
+	}
+	if tailReal > total {
+		tailReal = total
+	}
+
+	// Reallocate only the current-turn share inside the cache write back to
+	// input. Upstream's read and write stay authoritative; nothing is
+	// fabricated — if the upstream wrote nothing, creation stays zero even
+	// when the read prefix was large.
+	tailFromWrite := tailReal
+	if tailFromWrite > cacheWrite {
+		tailFromWrite = cacheWrite
+	}
+
+	input = uncached + tailFromWrite
+	read = cached
+	if read < 0 {
+		read = 0
+	}
+	creation = cacheWrite - tailFromWrite
+	if creation < 0 {
+		creation = 0
+	}
+	return input, read, creation
+}
+
 // collectCacheBreakpoints walks a Claude-shaped request body and returns the
 // declared cache_control breakpoints in evaluation order together with the
 // cumulative estimated token counts at each breakpoint. Blocks that are not
