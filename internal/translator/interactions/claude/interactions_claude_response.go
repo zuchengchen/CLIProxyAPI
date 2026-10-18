@@ -387,7 +387,7 @@ func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result,
 		// Devin's aggregate cache_write has no TTL dimension; split it into the
 		// Anthropic-style ephemeral buckets so downstream relays can bill the
 		// two TTLs. Session detection reuses the same signals the executor uses.
-		cc5m, cc1h := translatorcommon.SplitDevinCacheCreationTTL(originalRequest, remappedCreation, claudeRequestHasSession(originalRequest))
+		cc5m, cc1h := translatorcommon.SplitDevinCacheCreationTTL(originalRequest, remappedCreation, claudeRequestHasSession(originalRequest), gjson.GetBytes(originalRequest, "model").String())
 		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_5m_input_tokens", cc5m)
 		out, _ = sjson.SetBytes(out, path+".cache_creation.ephemeral_1h_input_tokens", cc1h)
 	}
