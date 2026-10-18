@@ -34,7 +34,9 @@ func TestLookupStaticModelInfoDevinRefreshAndFallback(t *testing.T) {
 		devinCatalogStore.mu.Unlock()
 	})
 
-	legacy := &ModelInfo{ID: "devin/swe-2", DisplayName: "Legacy", MaxCompletionTokens: 128000}
+	// Use a non-builtin ID so the test exercises the remote-catalog path rather
+	// than the hardcoded builtins (swe-1-6-slow and swe-2 are always upserted).
+	legacy := &ModelInfo{ID: "devin/swe-legacy-test", DisplayName: "Legacy", MaxCompletionTokens: 128000}
 	general := *originalGeneral
 	general.Devin = []*ModelInfo{legacy}
 	modelsCatalogStore.mu.Lock()
@@ -42,8 +44,8 @@ func TestLookupStaticModelInfoDevinRefreshAndFallback(t *testing.T) {
 	modelsCatalogStore.mu.Unlock()
 
 	for _, payload := range []string{
-		`{"devin":[{"id":"swe-2","max_completion_tokens":64000,"thinking":{"levels":["medium"]}}]}`,
-		`{"devin":[{"id":"swe-2","max_completion_tokens":32000,"thinking":{"levels":["high"]}}]}`,
+		`{"devin":[{"id":"swe-legacy-test","max_completion_tokens":64000,"thinking":{"levels":["medium"]}}]}`,
+		`{"devin":[{"id":"swe-legacy-test","max_completion_tokens":32000,"thinking":{"levels":["high"]}}]}`,
 	} {
 		if _, errLoad := loadDevinModelsFromBytes([]byte(payload), "test"); errLoad != nil {
 			t.Fatal(errLoad)
@@ -71,6 +73,10 @@ func TestLookupStaticModelInfoDevinRefreshAndFallback(t *testing.T) {
 	devinCatalogStore.mu.Unlock()
 	if got := LookupStaticModelInfo(legacy.ID); !reflect.DeepEqual(got, legacy) {
 		t.Fatalf("legacy fallback = %+v, want %+v", got, legacy)
+	}
+	// Builtin swe-2 keeps its pinned context length even with no dynamic catalog.
+	if got := LookupStaticModelInfo("devin/swe-2"); got == nil || got.ContextLength != 262000 {
+		t.Fatalf("builtin swe-2 context length = %+v, want 262000", got)
 	}
 
 	// Keep the hardcoded fallback only when both catalog sources are unavailable.

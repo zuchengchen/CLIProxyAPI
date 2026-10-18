@@ -37,6 +37,7 @@ func init() {
 }
 
 const devinBuiltinSWE16SlowID = "devin/swe-1-6-slow"
+const devinBuiltinSWE2ID = "devin/swe-2"
 
 func devinBuiltinSWE16SlowModelInfo() *ModelInfo {
 	return &ModelInfo{
@@ -55,11 +56,33 @@ func devinBuiltinSWE16SlowModelInfo() *ModelInfo {
 	}
 }
 
+// devinBuiltinSWE2ModelInfo pins swe-2's context length to 262000 so remote
+// catalog refreshes cannot advertise a window larger than the enforced limit.
+func devinBuiltinSWE2ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                        devinBuiltinSWE2ID,
+		Object:                    "model",
+		Type:                      "devin",
+		OwnedBy:                   "cognition",
+		DisplayName:               "SWE-2",
+		ContextLength:             262000,
+		MaxCompletionTokens:       64000,
+		InputTokenLimit:           262000,
+		OutputTokenLimit:          64000,
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"text"},
+		Thinking: &ThinkingSupport{
+			Levels: []string{"medium", "high", "max"},
+		},
+	}
+}
+
 // WithDevinBuiltins injects hard-coded Devin model definitions that should
 // not depend on remote or embedded devin_models.json updates. Built-ins replace
 // any matching IDs already present in the provided slice.
 func WithDevinBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, devinBuiltinSWE16SlowModelInfo())
+	models = upsertModelInfos(models, devinBuiltinSWE16SlowModelInfo())
+	return upsertModelInfos(models, devinBuiltinSWE2ModelInfo())
 }
 
 // GetDevinModels returns the active Devin model catalog.

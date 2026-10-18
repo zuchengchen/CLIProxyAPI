@@ -469,6 +469,17 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 		return nil, "", nil, errPayload
 	}
 
+	// Read-only guard: reject requests that exceed the model's advertised context
+	// window so the failure is a request-scoped error (context_length_exceeded)
+	// instead of an upstream provider error. The token estimate uses the same
+	// length heuristic as CountTokens (Devin exposes no token-count endpoint).
+	if contextLimit := devinModelContextLength(baseModel); contextLimit > 0 {
+		if estimate := estimateDevinPromptTokens(protoBytes); estimate > int64(contextLimit) {
+			log.Warnf("devin executor: rejecting request for %q, estimated prompt tokens %d exceed context length %d", baseModel, estimate, contextLimit)
+			return nil, "", nil, devinContextLengthExceededError(baseModel, estimate, contextLimit)
+		}
+	}
+
 	framed := helps.WrapConnectEnvelope(protoBytes)
 	url := strings.TrimRight(baseURL, "/") + helps.DevinChatPath
 
@@ -482,6 +493,51 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 	}
 
 	return httpReq, chatModelUID, logBody, nil
+}
+
+// devinModelContextLength returns the advertised context window for a Devin
+// model from the registry (dynamic catalog first, then static fallback), or 0
+// when the model is unknown.
+func devinModelContextLength(modelID string) int {
+	if modelInfo := registry.LookupModelInfo(modelID, "devin"); modelInfo != nil {
+		if modelInfo.MaxContextLength > 0 {
+			return modelInfo.MaxContextLength
+		}
+		if modelInfo.ContextLength > 0 {
+			return modelInfo.ContextLength
+		}
+		if modelInfo.InputTokenLimit > 0 {
+			return modelInfo.InputTokenLimit
+		}
+	}
+	return 0
+}
+
+// estimateDevinPromptTokens approximates prompt tokens from the finalized wire
+// payload size. Devin has no server-side token counter; ~4 bytes per token is
+// the same heuristic used by CountTokens.
+func estimateDevinPromptTokens(wirePayload []byte) int64 {
+	return int64(len(wirePayload) / 4)
+}
+
+// devinContextLengthExceededError builds a request-scoped error whose body is
+// valid OpenAI-style JSON. The code is recognized as a context-window failure
+// by downstream clients and relays (e.g. sub2api isOpenAIContextWindowError),
+// which triggers their compact/retry flows.
+func devinContextLengthExceededError(modelID string, estimatedTokens int64, contextLimit int) statusErr {
+	body, errMarshal := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": fmt.Sprintf("estimated prompt tokens (%d) exceed maximum context length (%d) for model %s", estimatedTokens, contextLimit, modelID),
+			"type":    "invalid_request_error",
+			"param":   "input",
+			"code":    "context_length_exceeded",
+		},
+	})
+	msg := string(body)
+	if errMarshal != nil {
+		msg = fmt.Sprintf("estimated prompt tokens (%d) exceed maximum context length (%d)", estimatedTokens, contextLimit)
+	}
+	return statusErr{code: http.StatusBadRequest, msg: msg}
 }
 
 const maxDevinToolCalls = 128

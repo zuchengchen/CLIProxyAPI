@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -4973,4 +4974,69 @@ func TestRegressionIssue6505_DevinClaudeStreamingNoFullInputEstimate(t *testing.
 	t.Run("partially cached prompt (input_tokens positive)", func(t *testing.T) {
 		runTest(t, 10, 0)
 	})
+}
+
+func TestDevinExecutor_ContextLengthExceededRejection(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-devin-ctx-limit-client"
+	modelID := "devin/swe-2-ctx-test"
+	const contextLimit = 262000
+	reg.RegisterClient(clientID, "devin", []*registry.ModelInfo{
+		{
+			ID:                  modelID,
+			ContextLength:       contextLimit,
+			MaxCompletionTokens: 64000,
+		},
+	})
+	defer reg.UnregisterClient(clientID)
+
+	cfg := &config.Config{}
+	exec := NewDevinExecutor(cfg)
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "test-key",
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatInteractions,
+	}
+
+	// Oversized request: ~4 bytes/token heuristic, so >1 MiB of text exceeds 262k.
+	oversizedText := strings.Repeat("a", contextLimit*4+4096)
+	oversized := []byte(fmt.Sprintf(`{
+		"input": [{"type":"user_input","content":[{"type":"text","text":%q}]}]
+	}`, oversizedText))
+	reqOversized := cliproxyexecutor.Request{Model: modelID, Payload: oversized}
+
+	_, _, _, err := exec.prepareDevinHTTPRequest(context.Background(), auth, reqOversized, opts)
+	if err == nil {
+		t.Fatal("expected context-length rejection for oversized payload")
+	}
+	var serr statusErr
+	if !errors.As(err, &serr) {
+		t.Fatalf("expected statusErr, got %T (%v)", err, err)
+	}
+	if serr.code != 400 {
+		t.Fatalf("status code = %d, want 400", serr.code)
+	}
+	if !gjson.GetBytes([]byte(serr.msg), "error.code").Exists() ||
+		gjson.GetBytes([]byte(serr.msg), "error.code").String() != "context_length_exceeded" {
+		t.Fatalf("error code = %q, want context_length_exceeded; body=%s",
+			gjson.GetBytes([]byte(serr.msg), "error.code").String(), serr.msg)
+	}
+
+	// Small request passes the guard.
+	small := []byte(`{
+		"input": [{"type":"user_input","content":[{"type":"text","text":"hello"}]}]
+	}`)
+	reqSmall := cliproxyexecutor.Request{Model: modelID, Payload: small}
+	if _, _, _, err := exec.prepareDevinHTTPRequest(context.Background(), auth, reqSmall, opts); err != nil {
+		t.Fatalf("small request rejected unexpectedly: %v", err)
+	}
+
+	// Unknown model (no registry entry) is not rejected.
+	reqUnknown := cliproxyexecutor.Request{Model: "devin/unknown-ctx-test", Payload: oversized}
+	if _, _, _, err := exec.prepareDevinHTTPRequest(context.Background(), auth, reqUnknown, opts); err != nil {
+		t.Fatalf("unknown model should bypass context guard, got: %v", err)
+	}
 }

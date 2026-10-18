@@ -325,20 +325,27 @@ func TestDevinSWE16Slow_Issue6111(t *testing.T) {
 func TestWithDevinBuiltins(t *testing.T) {
 	// Test WithDevinBuiltins with nil slice
 	builtins := WithDevinBuiltins(nil)
-	if len(builtins) != 1 {
-		t.Fatalf("expected 1 builtin model, got %d", len(builtins))
+	if len(builtins) != 2 {
+		t.Fatalf("expected 2 builtin models, got %d", len(builtins))
 	}
-	if builtins[0].ID != "devin/swe-1-6-slow" {
-		t.Errorf("expected ID 'devin/swe-1-6-slow', got %q", builtins[0].ID)
+	byID := make(map[string]*ModelInfo, len(builtins))
+	for _, m := range builtins {
+		byID[m.ID] = m
+	}
+	if byID["devin/swe-1-6-slow"] == nil {
+		t.Error("expected builtin devin/swe-1-6-slow")
+	}
+	if got := byID["devin/swe-2"]; got == nil || got.ContextLength != 262000 {
+		t.Errorf("expected builtin devin/swe-2 with context length 262000, got %+v", got)
 	}
 
-	// Test WithDevinBuiltins preserves existing models and injects swe-1-6-slow
+	// Test WithDevinBuiltins preserves existing models and injects builtins
 	existing := []*ModelInfo{
-		{ID: "devin/swe-2", DisplayName: "SWE-2"},
+		{ID: "devin/swe-legacy", DisplayName: "Legacy"},
 	}
 	merged := WithDevinBuiltins(existing)
-	if len(merged) != 2 {
-		t.Fatalf("expected 2 models, got %d", len(merged))
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 models, got %d", len(merged))
 	}
 
 	// Test WithDevinBuiltins replaces duplicate
@@ -346,11 +353,29 @@ func TestWithDevinBuiltins(t *testing.T) {
 		{ID: "devin/swe-1-6-slow", DisplayName: "Old Display Name"},
 	}
 	replaced := WithDevinBuiltins(duplicate)
-	if len(replaced) != 1 {
-		t.Fatalf("expected 1 model after deduplication, got %d", len(replaced))
+	if len(replaced) != 2 {
+		t.Fatalf("expected 2 models after deduplication, got %d", len(replaced))
 	}
-	if replaced[0].DisplayName != "SWE-1.6 Slow" {
-		t.Errorf("expected DisplayName 'SWE-1.6 Slow', got %q", replaced[0].DisplayName)
+	if got := replaced[0]; got.DisplayName != "SWE-1.6 Slow" {
+		t.Errorf("expected DisplayName 'SWE-1.6 Slow', got %q", got.DisplayName)
+	}
+
+	// A remote catalog trying to advertise a larger swe-2 window is overridden.
+	overrides := []*ModelInfo{
+		{ID: "devin/swe-2", DisplayName: "SWE-2", ContextLength: 1000000},
+	}
+	pinned := WithDevinBuiltins(overrides)
+	if len(pinned) != 2 {
+		t.Fatalf("expected 2 models after builtin upsert, got %d", len(pinned))
+	}
+	var pinnedSWE2 *ModelInfo
+	for _, m := range pinned {
+		if m.ID == "devin/swe-2" {
+			pinnedSWE2 = m
+		}
+	}
+	if pinnedSWE2 == nil || pinnedSWE2.ContextLength != 262000 {
+		t.Errorf("builtin swe-2 context length = %+v, want 262000 (remote override rejected)", pinnedSWE2)
 	}
 }
 
