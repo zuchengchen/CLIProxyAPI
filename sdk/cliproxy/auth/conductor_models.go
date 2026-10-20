@@ -235,13 +235,15 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 	}
 
 	state := existingModelState(auth, targetKey)
+	quotaExempt := isDevinQuotaExemptModel(auth.Provider, targetModel) || isDevinQuotaExemptModel(auth.Provider, targetKey)
+	propagationOnly := quotaExempt && isDevinCredentialQuotaPropagationOnly(state, now)
 	isSuspended := auth.Disabled || auth.Status == StatusDisabled
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) && !quotaExempt {
 		isSuspended = true
 	}
 	isQuotaExceeded := false
 	var suspendReason string
-	if state != nil {
+	if state != nil && !propagationOnly {
 		if state.Status == StatusDisabled || state.Unavailable || (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now)) {
 			isSuspended = true
 		}
@@ -252,7 +254,7 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
 		}
 	}
-	if len(auth.ModelStates) == 0 && auth.Unavailable && auth.NextRetryAfter.After(now) {
+	if len(auth.ModelStates) == 0 && auth.Unavailable && auth.NextRetryAfter.After(now) && !quotaExempt {
 		// With no per-model states, scheduling falls back to the credential-wide
 		// cooldown (isAuthBlockedForModel); the projection must agree with it.
 		// When states exist, unmatched models stay schedulable by design, so the
