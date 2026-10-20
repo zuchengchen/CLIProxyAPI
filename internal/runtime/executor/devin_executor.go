@@ -2619,7 +2619,13 @@ func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {
 // newDevinStatusErrorForAuth builds the scheduling view of a direct HTTP
 // (non-trailer) upstream failure. Daily/weekly quota exhaustion becomes
 // credential-scoped and, when auth is known, retries at the observed reset.
+// A 403 whose body reports a request-level rejection (content policy, malformed
+// tool/tool config) is remapped via MapDevinDeniedHTTPError so gateways fail
+// the request without quarantining the account.
 func newDevinStatusErrorForAuth(code int, headers http.Header, body []byte, auth *cliproxyauth.Auth) statusErr {
+	if mapped := helps.MapDevinDeniedHTTPError(body); mapped != 0 {
+		code = mapped
+	}
 	err := statusErr{code: code, msg: string(body)}
 	if code == http.StatusTooManyRequests && headers != nil {
 		if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {

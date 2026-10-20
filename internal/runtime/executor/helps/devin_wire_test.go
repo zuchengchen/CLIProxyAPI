@@ -338,6 +338,30 @@ func TestParseDevinTrailerError(t *testing.T) {
 	if code != 429 {
 		t.Errorf("status code = %d, want 429 for case-insensitive high demand match", code)
 	}
+
+	// Case: request-level tool configuration rejection → 400, not 403.
+	// Returning 403 makes gateways (e.g. sub2api) quarantine the account even
+	// though only this request's tool schema is at fault.
+	toolConfigJSON := []byte(`{"error":{"code":"permission_denied","message":"Unable to process request due to an mcp configuration issue. (trace ID: 00000000000000000000000000000000)"}}`)
+	code, err = ParseDevinTrailerError(toolConfigJSON)
+	if err == nil {
+		t.Fatal("expected error for tool configuration permission_denied")
+	}
+	if code != 400 {
+		t.Errorf("status code = %d, want 400 for tool configuration permission_denied", code)
+	}
+
+	// Case: Devin occasionally reports a generic upstream fault as
+	// permission_denied. Treat it as 502 so gateways retry/fail over without
+	// marking the account temporarily unschedulable.
+	permInternalJSON := []byte(`{"error":{"code":"permission_denied","message":"an internal error occurred (trace ID: 00000000000000000000000000000000)"}}`)
+	code, err = ParseDevinTrailerError(permInternalJSON)
+	if err == nil {
+		t.Fatal("expected error for internal-error permission_denied")
+	}
+	if code != 502 {
+		t.Errorf("status code = %d, want 502 for internal-error permission_denied", code)
+	}
 }
 
 func TestUTF8SplitBuffer(t *testing.T) {

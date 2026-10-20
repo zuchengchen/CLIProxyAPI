@@ -1004,8 +1004,18 @@ func ParseDevinTrailerError(payload []byte) (statusCode int, err error) {
 		return 0, nil
 	}
 
-	codeStr := strings.ToLower(trailer.Error.Code)
-	msgLower := strings.ToLower(trailer.Error.Message)
+	return MapDevinDeniedError(trailer.Error.Code, trailer.Error.Message)
+}
+
+// MapDevinDeniedError converts a Connect-RPC error code/message pair to an HTTP
+// status code and error, treating request-level rejections (content policy,
+// malformed tool config) distinctly from account-level permission failures.
+// Shared by the streaming trailer path and the non-streaming HTTP error path
+// so both classify "permission_denied: ... tool configuration issue" as 400,
+// not 403 — preventing gateways from quarantining the account.
+func MapDevinDeniedError(codeStr, message string) (statusCode int, err error) {
+	codeStr = strings.ToLower(codeStr)
+	msgLower := strings.ToLower(message)
 
 	httpCode := http.StatusBadGateway
 	switch codeStr {
@@ -1022,10 +1032,18 @@ func ParseDevinTrailerError(payload []byte) (statusCode int, err error) {
 	case "permission_denied":
 		if strings.Contains(msgLower, "high demand") {
 			httpCode = http.StatusTooManyRequests
-		} else if strings.Contains(msgLower, "content policy") {
-			// Content moderation rejects this request, not the account. A 403 would make
-			// clients prompt for re-login and gateways fail over or disable the account.
+		} else if strings.Contains(msgLower, "content policy") ||
+			strings.Contains(msgLower, "mcp configuration issue") {
+			// Request-level rejection (content moderation, malformed MCP/tool config,
+			// etc.) — not an account/credential problem. A 403 makes clients prompt
+			// re-login and gateways fail over or quarantine the account. Keep it at
+			// 400 so the request fails fast without poisoning the account pool.
 			httpCode = http.StatusBadRequest
+		} else if strings.Contains(msgLower, "an internal error occurred") {
+			// Devin occasionally returns permission_denied for transient upstream
+			// faults. Treat as 502 so the gateway retries/fails over without marking
+			// the account temporarily unschedulable.
+			httpCode = http.StatusBadGateway
 		} else {
 			httpCode = http.StatusForbidden
 		}
@@ -1049,7 +1067,29 @@ func ParseDevinTrailerError(payload []byte) (statusCode int, err error) {
 		}
 	}
 
-	return httpCode, fmt.Errorf("devin upstream error (%s): %s", trailer.Error.Code, trailer.Error.Message)
+	return httpCode, fmt.Errorf("devin upstream error (%s): %s", codeStr, message)
+}
+
+// MapDevinDeniedHTTPError returns the HTTP status code that a Connect-RPC /
+// Connect-JSON error body should map to when the upstream returned it as a
+// non-2xx HTTP response (rather than a streaming trailer). It shares the same
+// request-vs-account classification as MapDevinDeniedError so that a body like
+// `{"error":{"code":"permission_denied","message":"... tool configuration
+// issue"}}` maps to 400, not 403 — keeping gateways from quarantining the
+// account for a request-level rejection. Returns 0 if the body isn't a
+// recognizable Devin error payload.
+func MapDevinDeniedHTTPError(body []byte) int {
+	var payload struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil || payload.Error == nil {
+		return 0
+	}
+	code, _ := MapDevinDeniedError(payload.Error.Code, payload.Error.Message)
+	return code
 }
 
 // UTF8SplitBuffer buffers incomplete UTF-8 byte sequences across chunk boundaries.

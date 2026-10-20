@@ -4710,8 +4710,11 @@ func TestStreamDevinFrames_ImmediateTrailerError_NoInitialPayloadBeforeError(t *
 	type statusError interface {
 		StatusCode() int
 	}
-	if se, ok := firstChunk.Err.(statusError); !ok || se.StatusCode() != 403 {
-		t.Fatalf("expected status code 403, got error: %v", firstChunk.Err)
+	// Devin's "tool configuration issue" is a request-level rejection (the tool
+	// schema is malformed for this cascade), not an account/auth failure — it
+	// maps to 400 so gateways fail the request without quarantining the account.
+	if se, ok := firstChunk.Err.(statusError); !ok || se.StatusCode() != 400 {
+		t.Fatalf("expected status code 400, got error: %v", firstChunk.Err)
 	}
 }
 
