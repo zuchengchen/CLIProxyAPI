@@ -1002,6 +1002,10 @@ func ParseDevinTrailerError(payload []byte) (statusCode int, err error) {
 	case "permission_denied":
 		if strings.Contains(msgLower, "high demand") {
 			httpCode = http.StatusTooManyRequests
+		} else if strings.Contains(msgLower, "content policy") {
+			// Content moderation rejects this request, not the account. A 403 would make
+			// clients prompt for re-login and gateways fail over or disable the account.
+			httpCode = http.StatusBadRequest
 		} else {
 			httpCode = http.StatusForbidden
 		}

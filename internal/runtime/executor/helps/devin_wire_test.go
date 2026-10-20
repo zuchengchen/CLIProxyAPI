@@ -322,6 +322,16 @@ func TestParseDevinTrailerError(t *testing.T) {
 		t.Errorf("status code = %d, want 429 for resource_exhausted", code)
 	}
 
+	// Case: content policy block encoded as permission_denied → 400 (request-level, not account-level)
+	contentPolicyJSON := []byte(`{"error":{"code":"permission_denied","message":"Your request was blocked by our content policy. Please remove sensitive or unsafe content from your prompt, memories, and other settings and try again. (trace ID: 00000000000000000000000000000000)"}}`)
+	code, err = ParseDevinTrailerError(contentPolicyJSON)
+	if err == nil {
+		t.Fatal("expected error for content policy permission_denied")
+	}
+	if code != 400 {
+		t.Errorf("status code = %d, want 400 for content policy permission_denied", code)
+	}
+
 	// Case: high-demand matching is case-insensitive
 	highDemandLowerJSON := []byte(`{"error":{"code":"permission_denied","message":"HIGH DEMAND: please retry"}}`)
 	code, err = ParseDevinTrailerError(highDemandLowerJSON)
