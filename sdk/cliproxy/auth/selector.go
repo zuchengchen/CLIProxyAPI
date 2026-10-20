@@ -833,7 +833,8 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+	quotaExempt := isDevinQuotaExemptModel(auth.Provider, model)
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) && !quotaExempt {
 		return true, blockReasonCooldown, auth.Quota.NextRecoverAt
 	}
 	if model != "" {
@@ -843,6 +844,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			blocked := false
 			blockedReason := blockReasonNone
 			nextRetry := time.Time{}
+			independentBlock := false
 			for stateModel, state := range auth.ModelStates {
 				if state == nil || canonicalModelKey(stateModel) != modelKey {
 					continue
@@ -851,10 +853,14 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
 				}
+				if quotaExempt && isDevinCredentialQuotaPropagationOnly(state, now) {
+					continue
+				}
 				stateBlocked, reason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
 				if !stateBlocked {
 					continue
 				}
+				independentBlock = true
 				if next.IsZero() {
 					return true, reason, time.Time{}
 				}
@@ -865,8 +871,14 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				}
 			}
 			if matched {
+				if quotaExempt && !independentBlock {
+					return false, blockReasonNone, time.Time{}
+				}
 				return blocked, blockedReason, nextRetry
 			}
+			return false, blockReasonNone, time.Time{}
+		}
+		if quotaExempt {
 			return false, blockReasonNone, time.Time{}
 		}
 		return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)

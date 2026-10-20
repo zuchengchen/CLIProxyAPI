@@ -1133,8 +1133,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							if result.CredentialScope && !disableCooling {
-								for _, otherState := range auth.ModelStates {
+								for otherModel, otherState := range auth.ModelStates {
 									if otherState != nil && otherState != state {
+										if isDevinQuotaExemptModel(auth.Provider, otherModel) {
+											continue
+										}
 										// Normalize a naturally expired wrap first (issue #6690) so a
 										// stale marker cannot suppress snapshotting a fresh block.
 										if (otherState.credentialQuotaPropagated || otherState.Quota.Reason == "credential_quota") &&
