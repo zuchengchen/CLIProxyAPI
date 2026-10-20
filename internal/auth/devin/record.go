@@ -45,9 +45,15 @@ func (s *DevinAuthService) CreateAuthRecord(ctx context.Context, token string) (
 		plan = userStatus.Plan
 	}
 
-	identifier := userName
+	// Prefer identifiers guaranteed unique per account: email first, then
+	// user_id. user_name is not unique (e.g. two accounts both named "Jason
+	// Chen") and would collide on the same auth-file slot.
+	identifier := email
 	if identifier == "" {
 		identifier = userID
+	}
+	if identifier == "" {
+		identifier = userName
 	}
 	if identifier == "" {
 		// Avoid overwriting another account when profile lookup is unavailable.

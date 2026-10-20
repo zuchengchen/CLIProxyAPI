@@ -43,7 +43,10 @@ func TestCreateAuthRecord(t *testing.T) {
 			if !profileAvailable {
 				wantName = "testuser"
 			}
-			if record.Provider != "devin" || record.FileName != "devin-"+wantName+".json" || record.ID != record.FileName {
+			// File identity prefers the account-unique email over display
+			// names so two users sharing a user_name do not collide.
+			wantFile := "testuser@example.com"
+			if record.Provider != "devin" || record.FileName != "devin-"+wantFile+".json" || record.ID != record.FileName {
 				t.Fatalf("unexpected record identity: %s %s", record.Provider, record.FileName)
 			}
 			for key, want := range map[string]string{
