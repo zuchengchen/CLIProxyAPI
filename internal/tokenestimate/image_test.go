@@ -1,4 +1,4 @@
-package helps
+package tokenestimate
 
 import (
 	"bytes"
@@ -8,9 +8,8 @@ import (
 	"image/color"
 	"image/png"
 	"math/rand"
+	"strings"
 	"testing"
-
-	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // noisyPNGBase64 builds an incompressible PNG so the base64 size resembles a
@@ -82,30 +81,45 @@ func TestEstimateJSONPromptTokens_ExcludesInlineImageBytes(t *testing.T) {
 	}
 }
 
-func TestEstimateDevinWirePromptTokens_ExcludesImageBytes(t *testing.T) {
+func TestEstimateJSONTokensWithBlobs(t *testing.T) {
 	data := noisyPNGBase64(t, 700, 900)
-	var img []byte
-	img = protowire.AppendTag(img, 1, protowire.BytesType)
-	img = protowire.AppendString(img, data)
-	img = protowire.AppendTag(img, 2, protowire.BytesType)
-	img = protowire.AppendString(img, "image/png")
-	var prompt []byte
-	prompt = protowire.AppendTag(prompt, 3, protowire.BytesType)
-	prompt = protowire.AppendString(prompt, "describe")
-	prompt = protowire.AppendTag(prompt, 10, protowire.BytesType)
-	prompt = protowire.AppendBytes(prompt, img)
-	var wire []byte
-	wire = protowire.AppendTag(wire, 2, protowire.BytesType)
-	wire = protowire.AppendString(wire, "system")
-	wire = protowire.AppendTag(wire, 3, protowire.BytesType)
-	wire = protowire.AppendBytes(wire, prompt)
+	pdf := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("%PDF-1.7 stream"), 50_000))
 
-	got := EstimateDevinWirePromptTokens(wire)
-	want := int64(len(wire)-len(data))/4 + 840
-	if got != want {
-		t.Fatalf("wire estimate = %d, want %d (naive len/4 = %d)", got, want, len(wire)/4)
+	image := fmt.Sprintf(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":%q}}`, data)
+	if got, want := EstimateJSONTokensWithBlobs(image), EstimateJSONPromptTokens([]byte(image)); got != want || got > 1000 {
+		t.Fatalf("image estimate = %d, want %d (< 1000)", got, want)
 	}
-	if got := EstimateDevinWirePromptTokens([]byte{0xff, 0xff}); got != 0 {
-		t.Fatalf("malformed wire estimate = %d, want 0", got)
+
+	doc := fmt.Sprintf(`{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":%q}}`, pdf)
+	if got, want := EstimateJSONTokensWithBlobs(doc), int64(len(doc)-len(pdf)-2)/4+InlineBlobTokens; got != want {
+		t.Fatalf("pdf estimate = %d, want %d (naive len/4 = %d)", got, want, len(doc)/4)
+	}
+	if got := EstimateJSONPromptTokens([]byte(doc)); got != int64(len(doc)/4) {
+		t.Fatalf("EstimateJSONPromptTokens must keep pdf on length heuristic, got %d", got)
+	}
+
+	fileURL := fmt.Sprintf(`{"type":"input_file","file_data":"data:application/pdf;base64,%s"}`, pdf)
+	if got := EstimateJSONTokensWithBlobs(fileURL); got > InlineBlobTokens+100 {
+		t.Fatalf("data URL blob estimate = %d, want <= %d", got, InlineBlobTokens+100)
+	}
+
+	gemini := fmt.Sprintf(`{"inlineData":{"mimeType":"application/pdf","data":%q}}`, pdf)
+	if got := EstimateJSONTokensWithBlobs(gemini); got > InlineBlobTokens+100 {
+		t.Fatalf("gemini inlineData estimate = %d, want <= %d", got, InlineBlobTokens+100)
+	}
+
+	tinyBlob := `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"QUJD"}}`
+	if got := EstimateJSONTokensWithBlobs(tinyBlob); got != int64(len(tinyBlob)/4) {
+		t.Fatalf("tiny blob estimate = %d, want %d", got, len(tinyBlob)/4)
+	}
+
+	for _, raw := range []string{
+		`{"type":"text","text":"data: not a blob, just text"}`,
+		`{"type":"document","source":{"type":"text","media_type":"text/plain","data":"` + strings.Repeat("plain text ", 2000) + `"}}`,
+		`"a bare string content"`,
+	} {
+		if got := EstimateJSONTokensWithBlobs(raw); got != int64(len(raw)/4) {
+			t.Fatalf("text estimate for %.40q = %d, want %d", raw, got, len(raw)/4)
+		}
 	}
 }

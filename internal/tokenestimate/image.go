@@ -1,4 +1,7 @@
-package helps
+// Package tokenestimate provides byte-length prompt token heuristics that
+// charge inline images by pixel area instead of encoded size. It has no
+// internal dependencies so translators and executors can share it.
+package tokenestimate
 
 import (
 	"encoding/base64"
@@ -10,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/tidwall/gjson"
-	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // Byte-length token heuristics (~4 bytes per token) must not be applied to
@@ -19,8 +21,8 @@ import (
 // screenshot is ~600 KB of base64 (~150k "tokens" by length) but costs ~900
 // real input tokens. The helpers below charge inline images by pixel area.
 const (
-	// estimateBytesPerToken is the length heuristic used for non-image content.
-	estimateBytesPerToken = 4
+	// BytesPerToken is the length heuristic used for non-image content.
+	BytesPerToken = 4
 	// imageTokenPixelDivisor follows Anthropic's documented tokens ≈ w*h/750.
 	imageTokenPixelDivisor = 750
 	// imageTokenMaxLongEdge and imageTokenMaxPixels bound the server-side
@@ -33,6 +35,9 @@ const (
 	imageTokenFallback int64 = 1600
 	// imageTokenMinimum avoids charging near-zero for tiny icons.
 	imageTokenMinimum int64 = 85
+	// InlineBlobTokens caps the estimate for one non-image inline base64 blob
+	// (e.g. a PDF document); its encoded length says little about real cost.
+	InlineBlobTokens int64 = 1600
 )
 
 // EstimateImageTokens approximates the input tokens of one inline image from
@@ -80,35 +85,52 @@ func imageTokensForDimensions(width, height int) int64 {
 // request body while charging inline images (base64 "data" with an image
 // media type, or data:image/... URLs) by pixel area instead of encoded length.
 func EstimateJSONPromptTokens(payload []byte) int64 {
-	imageBytes, imageTokens := scanJSONInlineImages(gjson.ParseBytes(payload))
-	textBytes := int64(len(payload)) - imageBytes
+	return estimateJSON(gjson.ParseBytes(payload), len(payload), false)
+}
+
+// EstimateJSONTokensWithBlobs is EstimateJSONPromptTokens for one raw JSON
+// value that additionally charges every other inline base64 blob (data: URLs
+// of any media type, base64 sources such as application/pdf documents, Gemini
+// inlineData) at most InlineBlobTokens instead of its encoded length.
+func EstimateJSONTokensWithBlobs(raw string) int64 {
+	return estimateJSON(gjson.Parse(raw), len(raw), true)
+}
+
+func estimateJSON(node gjson.Result, size int, blobs bool) int64 {
+	mediaBytes, mediaTokens := scanJSONInlineImages(node, blobs)
+	textBytes := int64(size) - mediaBytes
 	if textBytes < 0 {
 		textBytes = 0
 	}
-	return textBytes/estimateBytesPerToken + imageTokens
+	return textBytes/BytesPerToken + mediaTokens
 }
 
-func scanJSONInlineImages(node gjson.Result) (imageBytes int64, imageTokens int64) {
+func scanJSONInlineImages(node gjson.Result, blobs bool) (imageBytes int64, imageTokens int64) {
 	switch {
 	case node.IsArray():
 		node.ForEach(func(_, child gjson.Result) bool {
-			b, t := scanJSONInlineImages(child)
+			b, t := scanJSONInlineImages(child, blobs)
 			imageBytes += b
 			imageTokens += t
 			return true
 		})
 	case node.IsObject():
 		mediaType := strings.ToLower(firstJSONString(node, "media_type", "mime_type", "mimeType"))
+		sourceType := node.Get("type").String()
 		node.ForEach(func(key, child gjson.Result) bool {
 			if child.Type == gjson.String {
 				value := child.String()
-				if isInlineImageString(key.String(), value, mediaType) {
+				switch {
+				case isInlineImageString(key.String(), value, mediaType):
 					imageBytes += int64(len(child.Raw))
 					imageTokens += EstimateImageTokens(value)
+				case blobs && isInlineBlobString(key.String(), value, mediaType, sourceType):
+					imageBytes += int64(len(child.Raw))
+					imageTokens += min(int64(len(child.Raw))/BytesPerToken, InlineBlobTokens)
 				}
 				return true
 			}
-			b, t := scanJSONInlineImages(child)
+			b, t := scanJSONInlineImages(child, blobs)
 			imageBytes += b
 			imageTokens += t
 			return true
@@ -133,57 +155,17 @@ func isInlineImageString(key, value, mediaType string) bool {
 	return key == "data" && strings.HasPrefix(mediaType, "image/") && len(value) > 0
 }
 
-// EstimateDevinWirePromptTokens estimates prompt tokens from a finalized Devin
-// protobuf payload. Inline images (Prompt #10, data #1) are charged by pixel
-// area; all other bytes keep the ~4 bytes/token heuristic.
-func EstimateDevinWirePromptTokens(wire []byte) int64 {
-	imageBytes, imageTokens := scanDevinWireImages(wire)
-	textBytes := int64(len(wire)) - imageBytes
-	if textBytes < 0 {
-		textBytes = 0
+// isInlineBlobString reports base64 payloads that are not images: data: URLs
+// with a ;base64 header, Anthropic {"type":"base64","data":...} sources, and
+// Gemini inlineData {"mimeType":...,"data":...}. Plain-text document sources
+// ({"type":"text","data":...}) stay on the length heuristic.
+func isInlineBlobString(key, value, mediaType, sourceType string) bool {
+	if value == "" {
+		return false
 	}
-	return textBytes/estimateBytesPerToken + imageTokens
-}
-
-func scanDevinWireImages(wire []byte) (imageBytes int64, imageTokens int64) {
-	forEachProtoBytesField(wire, func(num protowire.Number, prompt []byte) {
-		if num != 3 {
-			return
-		}
-		forEachProtoBytesField(prompt, func(num protowire.Number, img []byte) {
-			if num != 10 {
-				return
-			}
-			forEachProtoBytesField(img, func(num protowire.Number, data []byte) {
-				if num != 1 || len(data) == 0 {
-					return
-				}
-				imageBytes += int64(len(data))
-				imageTokens += EstimateImageTokens(string(data))
-			})
-		})
-	})
-	return imageBytes, imageTokens
-}
-
-// forEachProtoBytesField calls fn for every length-delimited field in msg and
-// stops silently on malformed input (the estimate then falls back to length).
-func forEachProtoBytesField(msg []byte, fn func(protowire.Number, []byte)) {
-	for len(msg) > 0 {
-		num, kind, tagLen := protowire.ConsumeTag(msg)
-		if tagLen < 0 {
-			return
-		}
-		msg = msg[tagLen:]
-		n := protowire.ConsumeFieldValue(num, kind, msg)
-		if n < 0 {
-			return
-		}
-		if kind == protowire.BytesType {
-			if data, m := protowire.ConsumeBytes(msg); m >= 0 {
-				fn(num, data)
-			}
-		}
-		msg = msg[n:]
+	if strings.HasPrefix(value, "data:") {
+		header, _, found := strings.Cut(value, ",")
+		return found && strings.HasSuffix(strings.ToLower(header), ";base64")
 	}
+	return key == "data" && (sourceType == "base64" || (sourceType == "" && mediaType != ""))
 }
