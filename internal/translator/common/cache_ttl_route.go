@@ -3,6 +3,7 @@ package common
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/tokenestimate"
 	"github.com/tidwall/gjson"
 )
 
@@ -48,16 +49,19 @@ type cacheBreakpoint struct {
 	static bool
 }
 
-// estimateTokens approximates token count from serialized bytes; ~4 bytes per
+// estimateTokens approximates token count from plain text bytes; ~4 bytes per
 // token matches the heuristic used elsewhere in this codebase.
 func estimateTokens(raw string) int64 {
-	return int64(len(raw) / 4)
+	return int64(len(raw) / tokenestimate.BytesPerToken)
 }
 
-// estimateBlockTokens estimates tokens for one prompt block (tool, system
-// block, or message content part) in the same units as estimateTokens.
+// estimateBlockTokens estimates tokens for serialized JSON (a tool, system
+// block, message content part, or whole request) in the same units as
+// estimateTokens. Inline base64 images are charged by pixel area and other
+// inline base64 blobs (e.g. PDFs) by a small fixed amount, so screenshots do
+// not inflate the prefix into the long-context 1h routing tier.
 func estimateBlockTokens(raw string) int64 {
-	return estimateTokens(raw)
+	return tokenestimate.EstimateJSONTokensWithBlobs(raw)
 }
 
 // minCacheableTokens returns the smallest prefix length a breakpoint may
@@ -159,7 +163,7 @@ func collectCacheBreakpoints(body []byte, model string) ([]cacheBreakpoint, bool
 	// tools
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			cum += estimateTokens(tool.Raw)
+			cum += estimateBlockTokens(tool.Raw)
 			markBreakpoint(tool.Get("cache_control"), true, true)
 			return true
 		})
@@ -170,7 +174,7 @@ func collectCacheBreakpoints(body []byte, model string) ([]cacheBreakpoint, bool
 	switch {
 	case system.IsArray():
 		system.ForEach(func(_, block gjson.Result) bool {
-			cum += estimateTokens(block.Raw)
+			cum += estimateBlockTokens(block.Raw)
 			markBreakpoint(block.Get("cache_control"), blockIsCacheable(block), true)
 			return true
 		})
@@ -189,12 +193,12 @@ func collectCacheBreakpoints(body []byte, model string) ([]cacheBreakpoint, bool
 			content := msg.Get("content")
 			if content.IsArray() {
 				content.ForEach(func(_, part gjson.Result) bool {
-					cum += estimateTokens(part.Raw)
+					cum += estimateBlockTokens(part.Raw)
 					markBreakpoint(part.Get("cache_control"), blockIsCacheable(part), false)
 					return true
 				})
 			} else {
-				cum += estimateTokens(content.Raw)
+				cum += estimateBlockTokens(content.Raw)
 			}
 			// A message-level cache_control applies to the whole message's
 			// prefix; treat it as a breakpoint at this position.
@@ -403,7 +407,7 @@ func AnthropicViewUsage(originalRequest []byte, uncached, cached, cacheWrite int
 	if len(originalRequest) > 0 {
 		tailEst := currentTurnTailTokens(originalRequest)
 		if tailEst > 0 {
-			promptEst := estimateTokens(string(originalRequest))
+			promptEst := estimateBlockTokens(string(originalRequest))
 			if promptEst > tailEst {
 				tailReal = total * tailEst / promptEst
 			}
