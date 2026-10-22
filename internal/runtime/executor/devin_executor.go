@@ -230,8 +230,9 @@ func (e *DevinExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 
 // CountTokens provides token counting for Devin requests.
 func (e *DevinExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	// Devin has no standalone token count endpoint; estimate via length heuristic.
-	promptTokens := int64(len(req.Payload) / 4)
+	// Devin has no standalone token count endpoint; estimate via length
+	// heuristic, charging inline images by pixel area instead of base64 size.
+	promptTokens := helps.EstimateJSONPromptTokens(req.Payload)
 	out := []byte(fmt.Sprintf(`{"total_tokens":%d,"input_tokens":%d}`, promptTokens, promptTokens))
 	return cliproxyexecutor.Response{Payload: out}, nil
 }
@@ -516,10 +517,11 @@ func devinModelContextLength(modelID string) int {
 }
 
 // estimateDevinPromptTokens approximates prompt tokens from the finalized wire
-// payload size. Devin has no server-side token counter; ~4 bytes per token is
-// the same heuristic used by CountTokens.
+// payload. Devin has no server-side token counter; text uses ~4 bytes per token
+// (same heuristic as CountTokens) while inline images are charged by pixel area,
+// so base64 screenshots do not inflate the estimate by orders of magnitude.
 func estimateDevinPromptTokens(wirePayload []byte) int64 {
-	return int64(len(wirePayload) / 4)
+	return helps.EstimateDevinWirePromptTokens(wirePayload)
 }
 
 // devinContextLengthExceededError builds a request-scoped error whose body is

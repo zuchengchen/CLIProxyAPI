@@ -5037,6 +5037,24 @@ func TestDevinExecutor_ContextLengthExceededRejection(t *testing.T) {
 		t.Fatalf("small request rejected unexpectedly: %v", err)
 	}
 
+	// Inline images are charged by pixel area, not base64 length: a screenshot
+	// whose base64 alone exceeds contextLimit*4 bytes must pass the guard.
+	pngData := devinTestNoisyPNGBase64(t, 600, 600)
+	imgCopies := contextLimit*4/len(pngData) + 2
+	imageParts := make([]string, 0, imgCopies+1)
+	imageParts = append(imageParts, `{"type":"text","text":"compare these screenshots"}`)
+	for i := 0; i < imgCopies; i++ {
+		imageParts = append(imageParts, fmt.Sprintf(`{"type":"image","data":%q,"mime_type":"image/png"}`, pngData))
+	}
+	withImages := []byte(`{"input":[{"type":"user_input","content":[` + strings.Join(imageParts, ",") + `]}]}`)
+	if len(withImages)/4 <= contextLimit {
+		t.Fatalf("image fixture too small: len/4=%d", len(withImages)/4)
+	}
+	reqImages := cliproxyexecutor.Request{Model: modelID, Payload: withImages}
+	if _, _, _, err := exec.prepareDevinHTTPRequest(context.Background(), auth, reqImages, opts); err != nil {
+		t.Fatalf("image request rejected by length heuristic: %v", err)
+	}
+
 	// Unknown model (no registry entry) is not rejected.
 	reqUnknown := cliproxyexecutor.Request{Model: "devin/unknown-ctx-test", Payload: oversized}
 	if _, _, _, err := exec.prepareDevinHTTPRequest(context.Background(), auth, reqUnknown, opts); err != nil {
