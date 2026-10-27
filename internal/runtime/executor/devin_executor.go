@@ -525,14 +525,24 @@ func estimateDevinPromptTokens(wirePayload []byte) int64 {
 	return helps.EstimateDevinWirePromptTokens(wirePayload)
 }
 
+// devinContextLengthExceededMessage uses OpenAI's canonical overflow wording
+// ("maximum context length is N tokens"). Some clients (Kilo Code / opencode)
+// lose error.code when a relay re-wraps the error into a streamed
+// response.failed event and fall back to matching the message text, so the
+// wording itself must be recognizable as a context-window failure.
+func devinContextLengthExceededMessage(modelID string, estimatedTokens int64, contextLimit int) string {
+	return fmt.Sprintf("This model's maximum context length is %d tokens. However, your request has an estimated %d prompt tokens (model %s). Please reduce the length of the messages.", contextLimit, estimatedTokens, modelID)
+}
+
 // devinContextLengthExceededError builds a request-scoped error whose body is
 // valid OpenAI-style JSON. The code is recognized as a context-window failure
 // by downstream clients and relays (e.g. sub2api isOpenAIContextWindowError),
 // which triggers their compact/retry flows.
 func devinContextLengthExceededError(modelID string, estimatedTokens int64, contextLimit int) statusErr {
+	message := devinContextLengthExceededMessage(modelID, estimatedTokens, contextLimit)
 	body, errMarshal := json.Marshal(map[string]any{
 		"error": map[string]any{
-			"message": fmt.Sprintf("estimated prompt tokens (%d) exceed maximum context length (%d) for model %s", estimatedTokens, contextLimit, modelID),
+			"message": message,
 			"type":    "invalid_request_error",
 			"param":   "input",
 			"code":    "context_length_exceeded",
@@ -540,7 +550,7 @@ func devinContextLengthExceededError(modelID string, estimatedTokens int64, cont
 	})
 	msg := string(body)
 	if errMarshal != nil {
-		msg = fmt.Sprintf("estimated prompt tokens (%d) exceed maximum context length (%d)", estimatedTokens, contextLimit)
+		msg = message
 	}
 	return statusErr{code: http.StatusBadRequest, msg: msg}
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -5026,6 +5027,16 @@ func TestDevinExecutor_ContextLengthExceededRejection(t *testing.T) {
 		gjson.GetBytes([]byte(serr.msg), "error.code").String() != "context_length_exceeded" {
 		t.Fatalf("error code = %q, want context_length_exceeded; body=%s",
 			gjson.GetBytes([]byte(serr.msg), "error.code").String(), serr.msg)
+	}
+	// Clients that only see the message text (Kilo Code / opencode after a
+	// relay re-wraps the error) detect overflow with OpenAI's canonical
+	// wording; keep it matchable.
+	gotMsg := gjson.GetBytes([]byte(serr.msg), "error.message").String()
+	if !regexp.MustCompile(`(?i)maximum context length is \d+ tokens`).MatchString(gotMsg) {
+		t.Fatalf("error message %q lacks canonical overflow wording", gotMsg)
+	}
+	if !strings.Contains(gotMsg, modelID) {
+		t.Fatalf("error message %q should name model %s", gotMsg, modelID)
 	}
 
 	// Small request passes the guard.
